@@ -120,8 +120,9 @@ class HiveDashboard {
             this.eventSources[name] = eventSource;
 
             eventSource.onopen = () => {
+                const wasOffline = !worker.connected;
                 worker.connected = true;
-                this.updateWorkerCard(name);
+                this.updateWorkerCard(name, wasOffline);
                 this.updateConnectionStatus();
             };
 
@@ -135,9 +136,10 @@ class HiveDashboard {
             };
 
             eventSource.onerror = () => {
+                const wasOnline = worker.connected;
                 worker.connected = false;
                 worker.status = 'offline';
-                this.updateWorkerCard(name);
+                this.updateWorkerCard(name, wasOnline);
                 this.updateConnectionStatus();
 
                 // Reconnect after delay
@@ -150,9 +152,10 @@ class HiveDashboard {
             };
         } catch (error) {
             console.error(`Failed to connect to ${name}:`, error);
+            const wasOnline = worker.connected;
             worker.connected = false;
             worker.status = 'offline';
-            this.updateWorkerCard(name);
+            this.updateWorkerCard(name, wasOnline);
         }
     }
 
@@ -220,7 +223,13 @@ class HiveDashboard {
         const grid = document.getElementById('workers-grid');
         grid.innerHTML = '';
 
-        for (const [name, worker] of Object.entries(this.workers)) {
+        // Sort workers: online first, offline last
+        const sortedWorkers = Object.entries(this.workers).sort(([, a], [, b]) => {
+            if (a.connected === b.connected) return 0;
+            return a.connected ? -1 : 1;
+        });
+
+        for (const [name, worker] of sortedWorkers) {
             const card = this.createWorkerCard(name, worker);
             grid.appendChild(card);
         }
@@ -228,21 +237,43 @@ class HiveDashboard {
 
     createWorkerCard(name, worker) {
         const card = document.createElement('div');
-        card.className = `worker-card ${worker.status}`;
+        card.className = `worker-card ${worker.connected ? worker.status : 'offline'}`;
         card.id = `worker-${name}`;
         card.onclick = () => this.openModal(name);
+
+        // Format output for display
+        let outputDisplay = '';
+        if (!worker.connected) {
+            outputDisplay = 'Connecting to worker...';
+        } else if (worker.lastOutput) {
+            outputDisplay = this.escapeHtml(worker.lastOutput);
+        } else if (worker.status === 'idle') {
+            outputDisplay = 'Worker ready, waiting for tasks...';
+        } else {
+            outputDisplay = 'Processing...';
+        }
+
+        // Status display
+        let statusDisplay = '';
+        if (!worker.connected) {
+            statusDisplay = `<span style="color:#ef4444">Offline</span> - ${worker.host}`;
+        } else if (worker.currentTask) {
+            statusDisplay = worker.currentTask;
+        } else {
+            statusDisplay = `<span style="color:#4ade80">Online</span> - Ready`;
+        }
 
         card.innerHTML = `
             <div class="worker-header">
                 <div>
                     <div class="worker-name">${name}</div>
-                    <div class="worker-ip">.${worker.host.split('.').pop()}</div>
+                    <div class="worker-ip">${worker.host}:${worker.port}</div>
                 </div>
-                <div class="worker-status-dot ${worker.status}"></div>
+                <div class="worker-status-dot ${worker.connected ? worker.status : 'offline'}"></div>
             </div>
             <div class="worker-body">
-                <div class="worker-task">${worker.currentTask || (worker.status === 'idle' ? 'Idle' : 'Connecting...')}</div>
-                <div class="worker-output">${this.escapeHtml(worker.lastOutput || '')}</div>
+                <div class="worker-task">${statusDisplay}</div>
+                <div class="worker-output">${outputDisplay}</div>
             </div>
             <div class="worker-footer">
                 <div class="worker-progress">
@@ -257,10 +288,16 @@ class HiveDashboard {
         return card;
     }
 
-    updateWorkerCard(name) {
+    updateWorkerCard(name, connectionChanged = false) {
         const worker = this.workers[name];
-        const existingCard = document.getElementById(`worker-${name}`);
 
+        // Re-render entire grid if connection status changed (for sorting)
+        if (connectionChanged) {
+            this.renderWorkers();
+            return;
+        }
+
+        const existingCard = document.getElementById(`worker-${name}`);
         if (existingCard) {
             const newCard = this.createWorkerCard(name, worker);
             existingCard.replaceWith(newCard);
