@@ -1,0 +1,13 @@
+# Claude-Hive Dependencies
+
+# Worker
+fastapi>=0.104.0
+uvicorn>=0.24.0
+
+# Controller
+click>=8.1.0
+httpx>=0.25.0
+pyyaml>=6.0.0
+
+# Shared
+pydantic>=2.5.0

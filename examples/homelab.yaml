@@ -1,0 +1,60 @@
+# Claude-Hive Configuration Example: Homelab Setup
+# Copy this file to ~/.claude-hive/config.yaml
+
+workers:
+  # Docker VM - Main container host
+  docker-vm:
+    host: 192.168.50.80
+    port: 8765
+    capabilities:
+      - docker
+      - containers
+      - services
+      - compose
+    tags:
+      - infrastructure
+      - production
+
+  # GPU Worker - ML/AI workloads
+  gpu-worker:
+    host: 192.168.50.92
+    port: 8765
+    capabilities:
+      - gpu
+      - ollama
+      - ml
+      - cuda
+      - comfyui
+    tags:
+      - ai
+      - compute
+
+  # Dev Server - Development environment
+  dev-server:
+    host: 192.168.50.100
+    port: 8765
+    capabilities:
+      - git
+      - build
+      - test
+      - code
+      - forgejo
+    tags:
+      - development
+
+# Routing rules (regex patterns, case-insensitive)
+routing:
+  # Docker/Container tasks
+  - pattern: "docker|container|容器|服务|compose|jellyfin|sonarr|radarr"
+    worker: docker-vm
+
+  # GPU/AI tasks
+  - pattern: "gpu|ollama|模型|model|训练|train|comfyui|stable.?diffusion"
+    worker: gpu-worker
+
+  # Development tasks
+  - pattern: "git|代码|code|编译|build|test|测试|forgejo"
+    worker: dev-server
+
+  # Default fallback
+  - default: docker-vm
