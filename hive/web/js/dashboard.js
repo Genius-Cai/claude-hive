@@ -27,6 +27,9 @@ class HiveDashboard {
 
         // Start polling for offline workers
         setInterval(() => this.checkOfflineWorkers(), 10000);
+
+        // Periodically refresh cards to check idle timeout (every minute)
+        setInterval(() => this.refreshIdleCards(), 60000);
     }
 
     async loadConfig() {
@@ -45,7 +48,8 @@ class HiveDashboard {
                     lastOutput: '',
                     outputLog: [],
                     elapsed: null,
-                    connected: false
+                    connected: false,
+                    lastTaskTime: null  // Track when last task completed
                 };
             }
 
@@ -193,12 +197,13 @@ class HiveDashboard {
             case 'task_complete':
                 worker.status = 'idle';
                 worker.elapsed = event.elapsed;
-                // Keep last output for reference
+                worker.lastTaskTime = Date.now();  // Track completion time
                 break;
 
             case 'task_error':
                 worker.status = 'error';
                 worker.lastOutput = event.error;
+                worker.lastTaskTime = Date.now();  // Track completion time
                 break;
         }
 
@@ -215,6 +220,22 @@ class HiveDashboard {
             if (!worker.connected && this.autoRefresh) {
                 // Try to reconnect
                 this.connectWorker(name);
+            }
+        }
+    }
+
+    /**
+     * Refresh idle worker cards to trigger timeout check
+     */
+    refreshIdleCards() {
+        const IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+        for (const [name, worker] of Object.entries(this.workers)) {
+            if (worker.status === 'idle' &&
+                worker.lastTaskTime &&
+                (Date.now() - worker.lastTaskTime > IDLE_TIMEOUT)) {
+                // Clear old output and refresh card
+                worker.currentTask = null;
+                this.updateWorkerCard(name);
             }
         }
     }
@@ -242,9 +263,18 @@ class HiveDashboard {
         card.onclick = () => this.openModal(name);
 
         // Format output for display
+        // Clear output after 5 minutes of idle to show ready state
+        const IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+        const isIdleTooLong = worker.status === 'idle' &&
+            worker.lastTaskTime &&
+            (Date.now() - worker.lastTaskTime > IDLE_TIMEOUT);
+
         let outputDisplay = '';
         if (!worker.connected) {
             outputDisplay = 'Connecting to worker...';
+        } else if (isIdleTooLong) {
+            // Clear old output after 5 minutes of idle
+            outputDisplay = 'Worker ready, waiting for tasks...';
         } else if (worker.lastOutput) {
             outputDisplay = this.parseOutput(worker.lastOutput);
         } else if (worker.status === 'idle') {
