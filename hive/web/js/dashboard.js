@@ -246,7 +246,7 @@ class HiveDashboard {
         if (!worker.connected) {
             outputDisplay = 'Connecting to worker...';
         } else if (worker.lastOutput) {
-            outputDisplay = this.escapeHtml(worker.lastOutput);
+            outputDisplay = this.parseOutput(worker.lastOutput);
         } else if (worker.status === 'idle') {
             outputDisplay = 'Worker ready, waiting for tasks...';
         } else {
@@ -363,8 +363,13 @@ class HiveDashboard {
         document.getElementById('modal-status').textContent =
             `Status: ${worker.status}`;
 
-        // Show full output log
-        const outputText = worker.outputLog.join('\n') || worker.lastOutput || '(No output)';
+        // Show full output log (parse each line for JSON result)
+        let outputText = '(No output)';
+        if (worker.outputLog.length > 0) {
+            outputText = worker.outputLog.map(line => this.parseOutputPlain(line)).join('\n');
+        } else if (worker.lastOutput) {
+            outputText = this.parseOutputPlain(worker.lastOutput);
+        }
         document.getElementById('modal-output-text').textContent = outputText;
 
         // Auto-scroll to bottom
@@ -376,6 +381,123 @@ class HiveDashboard {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    /**
+     * Convert markdown to terminal-friendly format (Fluid Dark style)
+     */
+    mdToTerminal(text) {
+        if (!text) return text;
+
+        return text
+            // Headers: ## Title → ◆ TITLE (uppercase, accent)
+            .replace(/^#{1,2}\s+(.+)$/gm, (_, title) => `◆ ${title.toUpperCase()}`)
+            // Subheaders: ### Title → ◇ Title
+            .replace(/^#{3,6}\s+(.+)$/gm, '◇ $1')
+            // Bold: **text** → 「text」
+            .replace(/\*\*(.+?)\*\*/g, '「$1」')
+            // Italic: *text* → text
+            .replace(/\*(.+?)\*/g, '$1')
+            // Table separators: |---|---| → remove
+            .replace(/^\|[-:\s|]+\|$/gm, '')
+            // 2-column tables: | key | value | → key: value
+            .replace(/^\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|$/gm, '  $1: $2')
+            // 3-column tables: | a | b | c | → a: b (c)
+            .replace(/^\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|$/gm, '  $1: $2 ($3)')
+            // 4+ column tables: simplify to comma separated
+            .replace(/^\|\s*(.+?)\s*\|$/gm, (_, content) => {
+                const cols = content.split('|').map(s => s.trim()).filter(s => s);
+                if (cols.length >= 4) {
+                    return '  ' + cols[0] + ': ' + cols.slice(1).join(', ');
+                }
+                return '  ' + cols.join(': ');
+            })
+            // List items: - item → › item
+            .replace(/^-\s+/gm, '› ')
+            // Checkboxes
+            .replace(/^-\s*\[x\]/gm, '✓')
+            .replace(/^-\s*\[\s*\]/gm, '○')
+            // Status icons
+            .replace(/✅/g, '●')
+            .replace(/⚠️/g, '▲')
+            .replace(/❌/g, '✕')
+            // Clean up extra blank lines
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    }
+
+    /**
+     * Extract result content from worker output
+     * Handles JSON with escaped newlines (\n as literal characters)
+     */
+    extractResult(text) {
+        if (!text) return text;
+
+        // Method 1: Find "result":" and extract content
+        const resultIndex = text.indexOf('"result":"');
+        if (resultIndex !== -1) {
+            let content = text.substring(resultIndex + 10); // Skip past "result":"
+
+            // Find the closing - handle escaped quotes
+            let end = content.length;
+            let depth = 0;
+            for (let i = 0; i < content.length; i++) {
+                if (content[i] === '\\' && i + 1 < content.length) {
+                    i++; // Skip escaped character
+                    continue;
+                }
+                if (content[i] === '"' && depth === 0) {
+                    end = i;
+                    break;
+                }
+            }
+
+            content = content.substring(0, end);
+
+            // Unescape JSON string
+            return content
+                .replace(/\\n/g, '\n')
+                .replace(/\\t/g, '\t')
+                .replace(/\\"/g, '"')
+                .replace(/\\\\/g, '\\');
+        }
+
+        // Method 2: Try standard JSON.parse
+        try {
+            const json = JSON.parse(text);
+            if (json.result !== undefined) return json.result;
+            if (json.error) return `[ERROR] ${json.error}`;
+        } catch (e) {
+            // Not valid JSON
+        }
+
+        return text;
+    }
+
+    /**
+     * Parse output for card view (preview only)
+     */
+    parseOutput(text) {
+        if (!text) return '';
+
+        let content = this.extractResult(text);
+        content = this.mdToTerminal(content);
+
+        // Get first few lines for preview
+        const lines = content.split('\n')
+            .filter(line => line.trim())
+            .slice(0, 5);
+
+        return this.escapeHtml(lines.join('\n')).replace(/\n/g, '<br>');
+    }
+
+    /**
+     * Parse output for modal view (full content)
+     */
+    parseOutputPlain(text) {
+        if (!text) return '';
+        const content = this.extractResult(text);
+        return this.mdToTerminal(content);
     }
 }
 

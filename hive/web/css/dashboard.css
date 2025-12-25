@@ -215,7 +215,7 @@ header h1 {
     border-top: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: var(--fluid-radius-lg);
     padding: 1.25rem;
-    min-height: 220px;
+    min-height: 280px;
     display: flex;
     flex-direction: column;
     cursor: pointer;
@@ -242,17 +242,31 @@ header h1 {
 }
 
 .worker-card.offline {
-    opacity: 0.5;
+    opacity: 0.45;
+    filter: saturate(0.3);
+    border-color: rgba(255, 255, 255, 0.05);
+}
+
+.worker-card.offline:hover {
+    opacity: 0.7;
+    filter: saturate(0.6);
 }
 
 .worker-card.executing {
-    border-color: rgba(234, 179, 8, 0.3);
-    box-shadow: 0 0 30px rgba(234, 179, 8, 0.1);
+    border-color: rgba(234, 179, 8, 0.4);
+    box-shadow:
+        0 4px 24px rgba(0, 0, 0, 0.3),
+        0 0 40px rgba(234, 179, 8, 0.15),
+        inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .worker-card.error {
-    border-color: rgba(239, 68, 68, 0.3);
-    box-shadow: 0 0 30px rgba(239, 68, 68, 0.1);
+    border-color: rgba(239, 68, 68, 0.5);
+    border-top-color: rgba(239, 68, 68, 0.6);
+    box-shadow:
+        0 4px 24px rgba(0, 0, 0, 0.3),
+        0 0 40px rgba(239, 68, 68, 0.2),
+        inset 0 0 20px rgba(239, 68, 68, 0.05);
 }
 
 /* ===== 8. WORKER HEADER ===== */
@@ -349,19 +363,20 @@ header h1 {
 /* ===== 11. OUTPUT TERMINAL ===== */
 .worker-output {
     font-family: 'JetBrains Mono', 'SF Mono', 'Monaco', monospace;
-    font-size: 0.75rem;
+    font-size: 0.8rem;
     color: rgba(255, 255, 255, 0.9);
     background: rgba(15, 15, 18, 0.7);
     border: 1px solid rgba(255, 255, 255, 0.08);
-    padding: 0.75rem;
+    padding: 0.875rem;
     border-radius: var(--fluid-radius-sm);
     flex: 1;
-    min-height: 80px;
-    max-height: 120px;
+    min-height: 120px;
+    max-height: 180px;
     overflow-y: auto;
+    overflow-x: hidden;
     white-space: pre-wrap;
-    word-break: break-all;
-    line-height: 1.5;
+    word-break: break-word;
+    line-height: 1.6;
     /* Scanline effect */
     background-image:
         repeating-linear-gradient(
@@ -455,9 +470,9 @@ header h1 {
     -webkit-backdrop-filter: blur(24px);
     border: 1px solid var(--fluid-glass-border);
     border-radius: var(--fluid-radius-lg);
-    width: 100%;
-    max-width: 900px;
-    max-height: 80vh;
+    width: 95%;
+    max-width: 1100px;
+    max-height: 85vh;
     display: flex;
     flex-direction: column;
     box-shadow: var(--fluid-shadow-md);
@@ -523,16 +538,19 @@ header h1 {
 .output-container {
     flex: 1;
     overflow: auto;
-    padding: 1rem 1.5rem;
+    padding: 1.25rem 1.5rem;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: var(--fluid-radius-sm);
+    margin: 0 1rem 1rem;
 }
 
 #modal-output-text {
     font-family: 'JetBrains Mono', 'SF Mono', 'Monaco', monospace;
-    font-size: 0.8rem;
-    line-height: 1.6;
+    font-size: 0.85rem;
+    line-height: 1.7;
     white-space: pre-wrap;
-    word-break: break-all;
-    color: rgba(255, 255, 255, 0.9);
+    word-break: break-word;
+    color: rgba(255, 255, 255, 0.95);
     margin: 0;
 }
 
