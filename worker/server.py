@@ -274,8 +274,9 @@ session_manager = SessionManager()
 executor = ClaudeExecutor(session_manager)
 start_time = time.time()
 
-# Get worker name from environment or hostname
-WORKER_NAME = os.environ.get("HIVE_WORKER_NAME", os.uname().nodename)
+# Get worker name from environment or hostname (cross-platform)
+import platform
+WORKER_NAME = os.environ.get("HIVE_WORKER_NAME", platform.node())
 
 # Create FastAPI app
 app = FastAPI(
