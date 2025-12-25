@@ -43,6 +43,7 @@ class TaskRequest(BaseModel):
     new_session: bool = False
     timeout: int = 300
     allowed_tools: Optional[list[str]] = None
+    autonomous: bool = True  # If True, prepend instructions for autonomous problem solving
 
 class TaskResponse(BaseModel):
     """Task execution response"""
@@ -163,7 +164,8 @@ class ClaudeExecutor:
         task: str,
         new_session: bool = False,
         timeout: int = 300,
-        allowed_tools: Optional[list[str]] = None
+        allowed_tools: Optional[list[str]] = None,
+        autonomous: bool = True
     ) -> TaskResponse:
         """Execute a task using Claude Code CLI"""
 
@@ -172,6 +174,18 @@ class ClaudeExecutor:
         # Clear session if requested
         if new_session:
             self.session_manager.clear_session()
+
+        # Prepend autonomous problem-solving instructions if enabled
+        if autonomous:
+            task = f"""You are a remote worker executing a task autonomously.
+IMPORTANT: If you encounter any issues (service not running, missing dependencies, etc.):
+1. Try to diagnose and fix the problem yourself
+2. Start services if needed (e.g., if Ollama is not running, start it)
+3. Install missing dependencies if necessary
+4. Retry the original task after fixing issues
+5. Only report failure if you truly cannot solve the problem
+
+Task: {task}"""
 
         # Build command
         cmd = ["claude", "-p", task, "--output-format", "json"]
@@ -227,9 +241,14 @@ class ClaudeExecutor:
             # Log to history
             self._log_history(task, output, execution_time)
 
+            # Ensure result is always a valid string
+            final_result = output if result.returncode == 0 else result.stderr
+            if final_result is None:
+                final_result = result.stdout or result.stderr or "(No output)"
+
             return TaskResponse(
                 success=result.returncode == 0,
-                result=output if result.returncode == 0 else result.stderr,
+                result=final_result,
                 session_id=new_session_id or session_id,
                 execution_time=execution_time,
                 timestamp=datetime.now().isoformat()
@@ -246,6 +265,14 @@ class ClaudeExecutor:
             return TaskResponse(
                 success=False,
                 result="Claude Code CLI not found. Please install: npm install -g @anthropic-ai/claude-code",
+                execution_time=time.time() - start_time,
+                timestamp=datetime.now().isoformat()
+            )
+        except Exception as e:
+            # Catch-all for any unexpected errors - return gracefully instead of 500
+            return TaskResponse(
+                success=False,
+                result=f"Unexpected error during execution: {type(e).__name__}: {str(e)}",
                 execution_time=time.time() - start_time,
                 timestamp=datetime.now().isoformat()
             )
@@ -324,7 +351,8 @@ async def execute_task(request: TaskRequest):
         task=request.task,
         new_session=request.new_session,
         timeout=request.timeout,
-        allowed_tools=request.allowed_tools
+        allowed_tools=request.allowed_tools,
+        autonomous=request.autonomous
     )
 
 @app.get("/session", response_model=SessionInfo)

@@ -98,12 +98,82 @@ def status(ctx):
 
 @cli.command()
 @click.argument("worker")
+@click.argument("command")
+@click.option("--timeout", "-t", default=30, help="Timeout in seconds")
+@click.pass_context
+def run(ctx, worker: str, command: str, timeout: int):
+    """Run a simple command via SSH (no AI, fast execution)
+
+    Use this for simple commands like 'ollama list', 'docker ps', etc.
+    For complex tasks that need AI reasoning, use 'send' instead.
+    """
+    config = ctx.obj["config"]
+
+    if worker not in config.workers:
+        click.echo(f"Worker '{worker}' not found. Available: {', '.join(config.workers.keys())}")
+        return
+
+    worker_config = config.workers[worker]
+
+    # Import SSH executor
+    import subprocess
+    import shutil
+
+    if not shutil.which("expect"):
+        click.echo("'expect' command not found. Install with: brew install expect")
+        return
+
+    # Get SSH credentials from config or use defaults
+    ssh_user = getattr(worker_config, 'ssh_user', 'geniuscai')
+    ssh_pass = getattr(worker_config, 'ssh_pass', 'Shangzhensteven2024!')
+    host = worker_config.host
+
+    click.echo(f"⚡ [{worker}] Running: {command}")
+
+    expect_script = f'''
+spawn ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {ssh_user}@{host} "{command}"
+expect {{
+    "password:" {{ send "{ssh_pass}\\r"; exp_continue }}
+    "Password:" {{ send "{ssh_pass}\\r"; exp_continue }}
+    timeout {{ exit 1 }}
+    eof
+}}
+'''
+    try:
+        result = subprocess.run(
+            ["expect", "-c", expect_script],
+            capture_output=True,
+            text=True,
+            timeout=timeout + 10
+        )
+        # Clean output
+        lines = result.stdout.split('\n')
+        clean_lines = [
+            l for l in lines
+            if not l.startswith('spawn ')
+            and 'password' not in l.lower()
+            and not l.startswith('Connection to')
+        ]
+        output = '\n'.join(clean_lines).strip()
+
+        click.echo("-" * 60)
+        click.echo(output)
+        click.echo("-" * 60)
+
+    except subprocess.TimeoutExpired:
+        click.echo(f"✗ Command timed out after {timeout}s")
+    except Exception as e:
+        click.echo(f"✗ Error: {e}")
+
+
+@cli.command()
+@click.argument("worker")
 @click.argument("task")
 @click.option("--new", "-n", is_flag=True, help="Start new session")
 @click.option("--timeout", "-t", default=300, help="Timeout in seconds")
 @click.pass_context
 def send(ctx, worker: str, task: str, new: bool, timeout: int):
-    """Send task to a specific worker"""
+    """Send task to a specific worker (uses Claude AI for reasoning)"""
     config = ctx.obj["config"]
     client = ctx.obj["client"]
 
@@ -118,13 +188,174 @@ def send(ctx, worker: str, task: str, new: bool, timeout: int):
 
     run_async(execute())
 
+def is_simple_command(task: str) -> tuple[bool, str]:
+    """
+    Analyze task to determine if it's a simple command (SSH) or complex task (AI).
+
+    Returns:
+        (is_simple, command_or_task): If simple, returns the shell command to run.
+                                       If complex, returns the original task.
+    """
+    task_lower = task.lower()
+
+    # Simple command patterns - direct shell commands
+    simple_patterns = [
+        # Ollama commands
+        (r"(列出|list|查看).*(ollama|模型|model)", "ollama list"),
+        (r"ollama\s+(list|ps|show|pull|run)", None),  # Direct ollama command
+
+        # Docker commands
+        (r"(列出|list|查看).*(docker|容器|container)", "docker ps --format 'table {{.Names}}\t{{.Status}}'"),
+        (r"docker\s+(ps|images|logs|stats)", None),  # Direct docker command
+
+        # System commands
+        (r"(查看|check|show).*(磁盘|disk|空间|space)", "df -h"),
+        (r"(查看|check|show).*(内存|memory|ram)", "free -h"),
+        (r"(查看|check|show).*(cpu|负载|load)", "uptime"),
+        (r"(服务|service).*(状态|status)", None),  # Need context
+
+        # Git commands
+        (r"git\s+(status|log|branch|diff)", None),  # Direct git command
+
+        # Network
+        (r"(ping|curl|wget)\s+", None),  # Direct network command
+    ]
+
+    import re
+    for pattern, command in simple_patterns:
+        if re.search(pattern, task_lower):
+            if command:
+                return True, command
+            else:
+                # Extract the actual command from the task
+                # If it looks like a shell command, use it directly
+                if re.match(r'^(ollama|docker|git|systemctl|ping|curl|df|free|uptime|ls|cat|head|tail)\s', task_lower):
+                    return True, task
+                return True, task
+
+    # Complex task indicators - need AI reasoning
+    complex_indicators = [
+        r"(为什么|why|怎么|how|debug|调试|修复|fix|问题|problem|error|错误)",
+        r"(帮我|help|请|please|分析|analyze|优化|optimize)",
+        r"(设置|setup|配置|configure|安装|install|部署|deploy)",
+        r"(创建|create|编写|write|生成|generate)",
+    ]
+
+    for pattern in complex_indicators:
+        if re.search(pattern, task_lower):
+            return False, task
+
+    # Default: if it looks like a direct command, use SSH; otherwise use AI
+    if re.match(r'^[a-z]+\s', task_lower) and len(task.split()) <= 5:
+        return True, task
+
+    return False, task
+
+
+@cli.command()
+@click.argument("task")
+@click.option("--timeout", "-t", default=300, help="Timeout in seconds")
+@click.pass_context
+def do(ctx, task: str, timeout: int):
+    """Smart execution - auto-detect simple command vs complex task
+
+    Examples:
+        hive do docker-vm "列出 Docker 容器"     # → SSH (simple)
+        hive do docker-vm "docker ps"            # → SSH (simple)
+        hive do docker-vm "调试 Jellyfin 问题"   # → AI (complex)
+    """
+    config = ctx.obj["config"]
+    router = ctx.obj["router"]
+    client = ctx.obj["client"]
+
+    if not config.workers:
+        click.echo("No workers configured.")
+        return
+
+    # Route to appropriate worker
+    worker = router.route(task)
+    if not worker:
+        worker = config.default_worker
+    if not worker:
+        click.echo("No matching worker found.")
+        return
+
+    worker_config = config.workers.get(worker)
+    if not worker_config:
+        click.echo(f"Worker '{worker}' not found.")
+        return
+
+    # Analyze task complexity
+    is_simple, command = is_simple_command(task)
+
+    if is_simple:
+        # Use SSH for simple commands
+        click.echo(f"⚡ [{worker}] SSH: {command}")
+
+        import subprocess
+        import shutil
+
+        if not shutil.which("expect"):
+            click.echo("'expect' not found. Falling back to AI mode.")
+            is_simple = False
+        else:
+            ssh_user = worker_config.ssh_user or 'geniuscai'
+            ssh_pass = worker_config.ssh_pass or 'Shangzhensteven2024!'
+            host = worker_config.host
+
+            expect_script = f'''
+spawn ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 {ssh_user}@{host} "{command}"
+expect {{
+    "password:" {{ send "{ssh_pass}\\r"; exp_continue }}
+    "Password:" {{ send "{ssh_pass}\\r"; exp_continue }}
+    timeout {{ exit 1 }}
+    eof
+}}
+'''
+            try:
+                result = subprocess.run(
+                    ["expect", "-c", expect_script],
+                    capture_output=True,
+                    text=True,
+                    timeout=min(timeout, 60) + 10
+                )
+                lines = result.stdout.split('\n')
+                clean_lines = [
+                    l for l in lines
+                    if not l.startswith('spawn ')
+                    and 'password' not in l.lower()
+                    and not l.startswith('Connection to')
+                ]
+                output = '\n'.join(clean_lines).strip()
+                click.echo("-" * 60)
+                click.echo(output)
+                click.echo("-" * 60)
+                return
+            except subprocess.TimeoutExpired:
+                click.echo(f"SSH timeout. Falling back to AI mode.")
+                is_simple = False
+            except Exception as e:
+                click.echo(f"SSH error: {e}. Falling back to AI mode.")
+                is_simple = False
+
+    # Use AI for complex tasks
+    click.echo(f"🧠 [{worker}] AI: {task}")
+
+    async def execute():
+        result = await client.execute(worker, task, new_session=True, timeout=timeout)
+        print_result(result)
+        await client.close()
+
+    run_async(execute())
+
+
 @cli.command()
 @click.argument("task")
 @click.option("--new", "-n", is_flag=True, help="Start new session")
 @click.option("--timeout", "-t", default=300, help="Timeout in seconds")
 @click.pass_context
 def ask(ctx, task: str, new: bool, timeout: int):
-    """Auto-route task to appropriate worker"""
+    """Auto-route task to appropriate worker (uses AI)"""
     config = ctx.obj["config"]
     router = ctx.obj["router"]
     client = ctx.obj["client"]

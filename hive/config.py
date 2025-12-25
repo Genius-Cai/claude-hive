@@ -23,6 +23,9 @@ class WorkerConfig(BaseModel):
     port: int = 8765
     capabilities: list[str] = []
     tags: list[str] = []
+    # SSH credentials for direct command execution
+    ssh_user: Optional[str] = None
+    ssh_pass: Optional[str] = None
 
     @property
     def url(self) -> str:
@@ -83,7 +86,9 @@ def load_config(config_path: Optional[str] = None) -> HiveConfig:
                 host=worker_data.get("host", "localhost"),
                 port=worker_data.get("port", 8765),
                 capabilities=worker_data.get("capabilities", []),
-                tags=worker_data.get("tags", [])
+                tags=worker_data.get("tags", []),
+                ssh_user=worker_data.get("ssh_user"),
+                ssh_pass=worker_data.get("ssh_pass")
             )
 
     # Parse routing rules
