@@ -1,4 +1,4 @@
-# Claude-Hive
+# Claude-Hive 蜂巢
 
 **Distributed Claude Code Orchestration Framework for LAN Environments**
 
