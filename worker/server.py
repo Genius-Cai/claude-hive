@@ -5,6 +5,11 @@ Claude-Hive Worker Server
 A lightweight HTTP API server that wraps Claude Code CLI,
 providing session persistence and remote task execution.
 
+Features:
+- Session persistence across tasks
+- Real-time SSE streaming for monitoring
+- Autonomous problem solving mode
+
 Usage:
     python server.py [--host 0.0.0.0] [--port 8765]
 """
@@ -16,10 +21,12 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Set
+from enum import Enum
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 # ============================================================================
@@ -32,6 +39,120 @@ HISTORY_FILE = HIVE_DIR / "history.jsonl"
 
 # Ensure directories exist
 HIVE_DIR.mkdir(parents=True, exist_ok=True)
+
+# ============================================================================
+# Worker Status & SSE Broadcasting
+# ============================================================================
+
+class WorkerStatus(str, Enum):
+    """Worker execution status"""
+    IDLE = "idle"
+    EXECUTING = "executing"
+    ERROR = "error"
+
+class OutputBroadcaster:
+    """
+    Manages SSE connections and broadcasts events to all connected clients.
+
+    This enables real-time monitoring from the web dashboard without
+    adding any token consumption (browser connects directly to workers).
+    """
+
+    def __init__(self):
+        self._clients: Set[asyncio.Queue] = set()
+        self._status = WorkerStatus.IDLE
+        self._current_task: Optional[str] = None
+        self._task_start_time: Optional[float] = None
+        self._last_output: str = ""
+
+    @property
+    def status(self) -> WorkerStatus:
+        return self._status
+
+    @property
+    def current_task(self) -> Optional[str]:
+        return self._current_task
+
+    def subscribe(self) -> asyncio.Queue:
+        """Add a new SSE client"""
+        queue: asyncio.Queue = asyncio.Queue()
+        self._clients.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue) -> None:
+        """Remove an SSE client"""
+        self._clients.discard(queue)
+
+    async def broadcast(self, event_type: str, data: dict) -> None:
+        """Send event to all connected clients"""
+        event = {
+            "type": event_type,
+            "timestamp": datetime.now().isoformat(),
+            **data
+        }
+        dead_clients = []
+        for client in self._clients:
+            try:
+                client.put_nowait(event)
+            except asyncio.QueueFull:
+                dead_clients.append(client)
+
+        # Clean up dead clients
+        for client in dead_clients:
+            self._clients.discard(client)
+
+    async def task_start(self, task: str) -> None:
+        """Signal task execution started"""
+        self._status = WorkerStatus.EXECUTING
+        self._current_task = task[:100]  # Truncate for display
+        self._task_start_time = time.time()
+        self._last_output = ""
+        await self.broadcast("task_start", {
+            "task": self._current_task,
+            "status": self._status.value
+        })
+
+    async def task_output(self, line: str) -> None:
+        """Send a line of output"""
+        self._last_output = line[:500]  # Truncate long lines
+        await self.broadcast("output", {
+            "line": self._last_output,
+            "elapsed": time.time() - (self._task_start_time or time.time())
+        })
+
+    async def task_complete(self, success: bool, result_preview: str = "") -> None:
+        """Signal task completed"""
+        elapsed = time.time() - (self._task_start_time or time.time())
+        self._status = WorkerStatus.IDLE
+        await self.broadcast("task_complete", {
+            "success": success,
+            "result_preview": result_preview[:200],
+            "elapsed": elapsed,
+            "status": self._status.value
+        })
+        self._current_task = None
+        self._task_start_time = None
+
+    async def task_error(self, error: str) -> None:
+        """Signal task error"""
+        self._status = WorkerStatus.ERROR
+        await self.broadcast("task_error", {
+            "error": error[:200],
+            "status": self._status.value
+        })
+
+    def get_state(self) -> dict:
+        """Get current worker state for /status endpoint"""
+        return {
+            "status": self._status.value,
+            "current_task": self._current_task,
+            "elapsed": time.time() - self._task_start_time if self._task_start_time else None,
+            "last_output": self._last_output,
+            "connected_clients": len(self._clients)
+        }
+
+# Global broadcaster instance
+broadcaster = OutputBroadcaster()
 
 # ============================================================================
 # Models
@@ -167,9 +288,13 @@ class ClaudeExecutor:
         allowed_tools: Optional[list[str]] = None,
         autonomous: bool = True
     ) -> TaskResponse:
-        """Execute a task using Claude Code CLI"""
+        """Execute a task using Claude Code CLI with real-time SSE broadcasting"""
 
         start_time = time.time()
+        original_task = task  # Keep original for display
+
+        # Broadcast task start (for SSE clients / web dashboard)
+        await broadcaster.task_start(original_task)
 
         # Clear session if requested
         if new_session:
@@ -200,25 +325,57 @@ Task: {task}"""
             cmd.extend(["--allowedTools", ",".join(allowed_tools)])
 
         try:
-            # Run Claude Code
-            result = await asyncio.to_thread(
-                subprocess.run,
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout
+            # Run Claude Code with streaming output capture
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
+
+            output_lines = []
+
+            async def read_stream(stream, is_stderr=False):
+                """Read stream line by line and broadcast to SSE clients"""
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    decoded = line.decode('utf-8', errors='replace').rstrip()
+                    if decoded:
+                        output_lines.append(decoded)
+                        # Broadcast each line to connected dashboard clients
+                        await broadcaster.task_output(decoded)
+
+            # Read stdout and stderr concurrently with timeout
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        read_stream(process.stdout),
+                        read_stream(process.stderr, is_stderr=True)
+                    ),
+                    timeout=timeout
+                )
+                await process.wait()
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                await broadcaster.task_error(f"Task timed out after {timeout}s")
+                return TaskResponse(
+                    success=False,
+                    result=f"Task timed out after {timeout} seconds",
+                    execution_time=time.time() - start_time,
+                    timestamp=datetime.now().isoformat()
+                )
 
             execution_time = time.time() - start_time
 
             # Parse output
-            output = result.stdout
+            output = '\n'.join(output_lines)
             new_session_id = None
 
             # Try to extract session_id from JSON output
             try:
-                # Claude Code JSON output may have multiple JSON objects
-                for line in output.strip().split('\n'):
+                for line in output_lines:
                     if line.strip():
                         try:
                             data = json.loads(line)
@@ -239,40 +396,42 @@ Task: {task}"""
             self.session_manager.increment_task_count()
 
             # Log to history
-            self._log_history(task, output, execution_time)
+            self._log_history(original_task, output, execution_time)
 
             # Ensure result is always a valid string
-            final_result = output if result.returncode == 0 else result.stderr
-            if final_result is None:
-                final_result = result.stdout or result.stderr or "(No output)"
+            final_result = output if process.returncode == 0 else output
+            if not final_result:
+                final_result = "(No output)"
+
+            success = process.returncode == 0
+
+            # Broadcast task completion
+            await broadcaster.task_complete(success, final_result[:200])
 
             return TaskResponse(
-                success=result.returncode == 0,
+                success=success,
                 result=final_result,
                 session_id=new_session_id or session_id,
                 execution_time=execution_time,
                 timestamp=datetime.now().isoformat()
             )
 
-        except subprocess.TimeoutExpired:
-            return TaskResponse(
-                success=False,
-                result=f"Task timed out after {timeout} seconds",
-                execution_time=time.time() - start_time,
-                timestamp=datetime.now().isoformat()
-            )
         except FileNotFoundError:
+            error_msg = "Claude Code CLI not found. Please install: npm install -g @anthropic-ai/claude-code"
+            await broadcaster.task_error(error_msg)
             return TaskResponse(
                 success=False,
-                result="Claude Code CLI not found. Please install: npm install -g @anthropic-ai/claude-code",
+                result=error_msg,
                 execution_time=time.time() - start_time,
                 timestamp=datetime.now().isoformat()
             )
         except Exception as e:
-            # Catch-all for any unexpected errors - return gracefully instead of 500
+            # Catch-all for any unexpected errors
+            error_msg = f"Unexpected error: {type(e).__name__}: {str(e)}"
+            await broadcaster.task_error(error_msg)
             return TaskResponse(
                 success=False,
-                result=f"Unexpected error during execution: {type(e).__name__}: {str(e)}",
+                result=error_msg,
                 execution_time=time.time() - start_time,
                 timestamp=datetime.now().isoformat()
             )
@@ -299,7 +458,7 @@ Task: {task}"""
 # Initialize components
 session_manager = SessionManager()
 executor = ClaudeExecutor(session_manager)
-start_time = time.time()
+server_start_time = time.time()
 
 # Get worker name from environment or hostname (cross-platform)
 import platform
@@ -337,7 +496,7 @@ async def health():
         status="ok",
         session_id=session_manager.get_session_id(),
         claude_version=executor.get_claude_version(),
-        uptime=time.time() - start_time,
+        uptime=time.time() - server_start_time,
         worker_name=WORKER_NAME
     )
 
@@ -382,6 +541,75 @@ async def get_history(limit: int = 20):
         except Exception:
             pass
     return {"history": history}
+
+# ============================================================================
+# SSE Streaming Endpoints (for Web Dashboard - zero token overhead)
+# ============================================================================
+
+@app.get("/status")
+async def get_status():
+    """
+    Get current worker status.
+    Used by dashboard for initial state and polling fallback.
+    """
+    return {
+        "worker_name": WORKER_NAME,
+        "uptime": time.time() - server_start_time,
+        "claude_version": executor.get_claude_version(),
+        **broadcaster.get_state()
+    }
+
+@app.get("/stream")
+async def stream_events():
+    """
+    SSE endpoint for real-time task output streaming.
+
+    The web dashboard connects directly to each worker's /stream endpoint.
+    This does NOT go through Controller Claude, so it adds ZERO token overhead.
+
+    Event types:
+    - status: Worker status change (idle/executing/error)
+    - task_start: Task execution started
+    - output: Real-time output line from Claude
+    - task_complete: Task finished successfully
+    - task_error: Task failed with error
+    """
+    queue = broadcaster.subscribe()
+
+    async def event_generator():
+        try:
+            # Send initial status
+            initial = {
+                "type": "status",
+                "worker_name": WORKER_NAME,
+                "timestamp": datetime.now().isoformat(),
+                **broadcaster.get_state()
+            }
+            yield f"data: {json.dumps(initial)}\n\n"
+
+            # Stream events
+            while True:
+                try:
+                    # Wait for events with timeout (for keepalive)
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    # Send keepalive ping
+                    yield f": keepalive\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            broadcaster.unsubscribe(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        }
+    )
 
 # ============================================================================
 # Main Entry Point

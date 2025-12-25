@@ -381,15 +381,39 @@ def ask(ctx, task: str, new: bool, timeout: int):
 @cli.command()
 @click.argument("task")
 @click.option("--timeout", "-t", default=300, help="Timeout in seconds")
+@click.option("--monitor", "-m", is_flag=True, help="Open dashboard for real-time monitoring")
 @click.pass_context
-def broadcast(ctx, task: str, timeout: int):
-    """Send task to all workers"""
+def broadcast(ctx, task: str, timeout: int, monitor: bool):
+    """Send task to all workers
+
+    Use --monitor to open the real-time dashboard and watch progress.
+    """
     config = ctx.obj["config"]
     client = ctx.obj["client"]
 
     if not config.workers:
         click.echo("No workers configured.")
         return
+
+    if monitor:
+        # Start dashboard in background and open browser
+        import subprocess
+        import webbrowser
+        import time
+
+        click.echo("🖥️  Starting dashboard...")
+
+        # Start dashboard server in background
+        dashboard_proc = subprocess.Popen(
+            [sys.executable, "-m", "hive.webserver", "--port", "8800"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+        time.sleep(1)  # Wait for server to start
+        webbrowser.open("http://localhost:8800")
+        click.echo("📊 Dashboard opened at http://localhost:8800")
+        click.echo()
 
     click.echo(f"📡 Broadcasting to {len(config.workers)} workers...")
 
@@ -600,6 +624,26 @@ def deploy(ip: str, name: str, ssh_user: str, ssh_pass: str, port: int):
         click.echo(f"\n❌ Deployment failed. Check errors above.")
 
     click.echo()
+
+
+@cli.command()
+@click.option("--port", "-p", default=8800, help="Dashboard port (default: 8800)")
+@click.option("--open", "-o", "open_browser", is_flag=True, help="Open browser automatically")
+def web(port: int, open_browser: bool):
+    """
+    Launch the real-time monitoring dashboard.
+
+    The dashboard connects directly to each worker's SSE endpoint,
+    providing real-time task monitoring with ZERO token overhead.
+
+    Example:
+        hive web              # Start on port 8800
+        hive web --open       # Start and open browser
+        hive web --port 9000  # Custom port
+    """
+    from .webserver import run_server
+
+    run_server(port=port, open_browser=open_browser)
 
 
 @cli.command()
